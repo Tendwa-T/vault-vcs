@@ -1,4 +1,4 @@
-.vault/
+tvault/
 .git/
 target/
 node_modules/

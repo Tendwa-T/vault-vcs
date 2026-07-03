@@ -2,6 +2,9 @@
 
 VaultVCS (`vault`) is a lightweight, Git-like version control system written in Rust. It provides a simple command-line interface to track, diff, branch, merge, log, and manage project history.
 
+> [!WARNING]
+> VaultVCS is a **hobby project** built to explore the design and implementation of version control systems. Users should exercise caution using it to manage critical, production-grade, or irreplaceable codebases. Feel free to contribute. Have fun !!
+
 ## Table of Contents
 
 - [Features](#features)
@@ -69,6 +72,7 @@ cargo install --path crates/vault-cli
 ```
 
 The installer automatically places the compiled `vault` binary inside `~/.cargo/bin/`, which Rustup appends to your shell's `PATH`. You can verify the installation by running:
+
 ```bash
 vault --version
 ```
