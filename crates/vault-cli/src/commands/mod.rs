@@ -1,3 +1,4 @@
+pub mod amend;
 pub mod branch;
 pub mod diff;
 pub mod init;

@@ -66,6 +66,12 @@ enum Commands {
     Show {
         id: String,
     },
+
+    /// Amend
+    Amend {
+        #[arg(short, long)]
+        message: Option<String>,
+    },
 }
 
 fn main() {
@@ -82,6 +88,7 @@ fn main() {
         Commands::Undo => undo::run(),
         Commands::Oplog => oplog::run(),
         Commands::Show { id } => show::run(&id),
+        Commands::Amend { message } => amend::run(message.as_deref()),
     };
 
     if let Err(e) = result {

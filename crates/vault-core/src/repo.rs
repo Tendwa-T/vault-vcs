@@ -1,9 +1,7 @@
 use crate::diff::{DiffKind, FileDiff, diff_trees};
 use crate::error::Result;
 use crate::merge::three_way_merge;
-use crate::objects::{
-    Author, Commit, EntryKind, FileStatus, StatusEntry, Tree, TreeEntry,
-};
+use crate::objects::{Author, Commit, EntryKind, FileStatus, StatusEntry, Tree, TreeEntry};
 use crate::oplog::{OpEntry, OpLog};
 use crate::store::ObjectStore;
 use crate::{VaultError, dag};
@@ -20,7 +18,50 @@ pub struct Repo {
     pub oplog: OpLog,
 }
 
+pub struct AmendOutcome {
+    pub old_hash: String,
+    pub new_hash: String,
+}
+
 impl Repo {
+    pub fn amend(&self, new_message: Option<&str>) -> Result<AmendOutcome> {
+        let old_hash = self
+            .store
+            .resolve_head()?
+            .ok_or_else(|| VaultError::ObjectNotFound("HEAD - Nothing to amend".into()))?;
+
+        let old_commit = self.store.read_commit(&old_hash)?;
+        let new_tree = self.snapshot_working_dir()?;
+        let new_commit = Commit {
+            tree: new_tree,
+            parents: old_commit.parents.clone(),
+            author: old_commit.author.clone(),
+            timestamp: chrono::Utc::now(),
+            message: new_message.unwrap_or(&old_commit.message).to_string(),
+            change_id: old_commit.change_id.clone(),
+        };
+
+        let new_hash = self.store.write_commit(&new_commit)?;
+        let branch = self
+            .store
+            .current_branch()?
+            .unwrap_or_else(|| "main".to_string());
+        self.store.write_branch(&branch, &new_hash)?;
+
+        self.oplog.append(&OpEntry {
+            op: "ammend".to_string(),
+            timestamp: Utc::now(),
+            head_before: Some(old_hash.clone()),
+            head_after: Some(new_hash.clone()),
+            branch: Some(branch),
+            message: new_message.map(|s| s.to_string()),
+            extra: None,
+            undone: false,
+        })?;
+
+        Ok(AmendOutcome { old_hash, new_hash })
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let mut current = path.to_path_buf();
         loop {
