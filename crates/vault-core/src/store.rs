@@ -57,7 +57,7 @@ impl ObjectStore {
     pub fn write_tree(&self, tree: &Tree) -> Result<String> {
         let bytes = serde_json::to_vec(tree)?;
         let hash = blake3::hash(&bytes).to_hex().to_string();
-        let path = self.commit_path(&hash);
+        let path = self.tree_path(&hash);
         if !path.exists() {
             fs::write(&path, &bytes)?;
         }
@@ -107,6 +107,9 @@ impl ObjectStore {
     // Branches
     pub fn write_branch(&self, name: &str, commit_hash: &str) -> Result<()> {
         let path = self.branch_path(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(path, commit_hash)?;
         Ok(())
     }
@@ -122,14 +125,28 @@ impl ObjectStore {
         self.branch_path(name).exists()
     }
 
-    pub fn list_branched(&self) -> Result<Vec<String>> {
+    pub fn list_branches(&self) -> Result<Vec<String>> {
         let dir = self.root.join("refs").join("heads");
         let mut branches = Vec::new();
-        for entry in fs::read_dir(dir)? {
-            let e = entry?;
-            branches.push(e.file_name().to_string_lossy().to_string());
+        if dir.exists() {
+            self.collect_branches_rec(&dir, &dir, &mut branches)?;
         }
         Ok(branches)
+    }
+
+    fn collect_branches_rec(&self, base: &Path, current: &Path, branches: &mut Vec<String>) -> Result<()> {
+        for entry in fs::read_dir(current)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                self.collect_branches_rec(base, &path, branches)?;
+            } else {
+                if let Ok(rel_path) = path.strip_prefix(base) {
+                    branches.push(rel_path.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        Ok(())
     }
 
     // Head
