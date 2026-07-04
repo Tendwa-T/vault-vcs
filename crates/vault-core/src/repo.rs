@@ -1,12 +1,18 @@
-use crate::diff::{DiffKind, FileDiff, diff_trees};
+use crate::VaultError::ObjectNotFound;
+use crate::cherry::compute_cherry;
+use crate::diff::{DiffKind, FileDiff, diff_trees, flatten_tree};
 use crate::error::Result;
-use crate::merge::three_way_merge;
-use crate::objects::{Author, Commit, EntryKind, FileStatus, StatusEntry, Tree, TreeEntry};
+use crate::merge::{build_tree_from_flat_pub, three_way_merge};
+use crate::objects::{
+    Author, Commit, EntryKind, FileStatus, FlatTree, StatusEntry, Tree, TreeEntry,
+};
 use crate::oplog::{OpEntry, OpLog};
+use crate::snapshot::{SnapshotEntry, SnapshotStore};
+use crate::stash::{StashEntry, StashStore};
 use crate::store::ObjectStore;
 use crate::{VaultError, dag};
 use chrono::Utc;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -21,6 +27,11 @@ pub struct Repo {
 pub struct AmendOutcome {
     pub old_hash: String,
     pub new_hash: String,
+}
+
+pub struct SplitOutcome {
+    pub first_hash: String,
+    pub second_hash: String,
 }
 
 impl Repo {
@@ -489,6 +500,401 @@ impl Repo {
         };
         Ok(ShowResult { commit, diffs })
     }
+
+    pub fn squash(&self, n: usize, new_message: &str) -> Result<String> {
+        if n < 2 {
+            return Err(VaultError::ObjectNotFound(
+                "squash requires at least 2 commits".to_string(),
+            ));
+        }
+
+        let head_hash = self
+            .store
+            .resolve_head()?
+            .ok_or_else(|| VaultError::ObjectNotFound("HEAD".to_string()))?;
+
+        // walk back the commits
+        let mut commits = Vec::new();
+        let mut cursor = head_hash.clone();
+        for _ in 0..n {
+            let c = self.store.read_commit(&cursor)?;
+            let next = c.parents.first().cloned();
+            commits.push((cursor.clone(), c));
+            match next {
+                Some(p) => cursor = p,
+                None => break,
+            }
+        }
+        if commits.len() < n {
+            return Err(VaultError::ObjectNotFound(format!(
+                "only {} commit(s) in history, cannot squash {}",
+                commits.len(),
+                n
+            )));
+        }
+
+        let (_, oldest) = &commits[commits.len() - 1];
+        let (_, newest) = &commits[0];
+
+        // the parent of the squashed result becomes the parent of the olderst squash commit
+        let new_parents = oldest.parents.clone();
+
+        let squashed = Commit {
+            tree: newest.tree.clone(),
+            parents: new_parents,
+            author: self.author(),
+            timestamp: Utc::now(),
+            message: new_message.to_string(),
+            change_id: oldest.change_id.clone(),
+        };
+
+        let new_hash = self.store.write_commit(&squashed)?;
+        let branch = self.store.current_branch()?.unwrap_or("main".to_string());
+        self.store.write_branch(&branch, &new_hash)?;
+
+        self.oplog.append(&OpEntry {
+            op: "squash".to_string(),
+            timestamp: Utc::now(),
+            head_before: Some(head_hash),
+            head_after: Some(new_hash.clone()),
+            branch: Some(branch),
+            message: Some(new_message.to_string()),
+            extra: Some(format!("squashed {} commits", n)),
+            undone: false,
+        })?;
+
+        Ok(new_hash)
+    }
+
+    //Tags
+    pub fn create_tag(&self, name: &str, hash: Option<&str>) -> Result<()> {
+        let target = match hash {
+            Some(h) => h.to_string(),
+            None => self
+                .store
+                .resolve_head()?
+                .ok_or_else(|| VaultError::ObjectNotFound("HEAD".to_string()))?,
+        };
+
+        let tag_path = self.vault_dir.join("refs").join("tags").join(name);
+        if tag_path.exists() {
+            return Err(VaultError::BranchExists(format!("tag '{}'", name)));
+        }
+
+        fs::create_dir_all(self.vault_dir.join("refs").join("tags"))?;
+
+        fs::write(&tag_path, &target)?;
+        Ok(())
+    }
+
+    pub fn list_tags(&self) -> Result<Vec<(String, String)>> {
+        let dir = self.vault_dir.join("refs").join("tags");
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut tags = Vec::new();
+
+        for entry in fs::read_dir(dir)? {
+            let e = entry?;
+            let name = e.file_name().to_string_lossy().to_string();
+            let hash = fs::read_to_string(e.path())?.trim().to_string();
+            tags.push((name, hash));
+        }
+        Ok(tags)
+    }
+
+    // Stash
+    pub fn stash_save(&self, name: &str) -> Result<()> {
+        let branch = self.store.current_branch()?.unwrap_or("main".to_string());
+        let tree = self.snapshot_working_dir()?;
+        let store = StashStore::new(&self.vault_dir);
+
+        store.save(StashEntry {
+            name: name.to_string(),
+            tree_hash: tree.clone(),
+            created_at: Utc::now(),
+            branch,
+        })?;
+
+        // Restore the HEAD tree
+        if let Some(head) = self.store.resolve_head()? {
+            let head_commit = self.store.read_commit(&head)?;
+            self.restore_tree(&head_commit.tree)?;
+        }
+
+        self.oplog.append(&OpEntry {
+            op: "stash-save".to_string(),
+            timestamp: Utc::now(),
+            head_before: self.store.resolve_head()?,
+            head_after: self.store.resolve_head()?,
+            branch: Some(self.store.current_branch()?.unwrap_or_default()),
+            message: Some(name.to_string()),
+            extra: None,
+            undone: false,
+        })?;
+
+        Ok(())
+    }
+
+    pub fn stash_list(&self) -> Result<Vec<StashEntry>> {
+        StashStore::new(&self.vault_dir).list()
+    }
+
+    pub fn stash_restore(&self, name: &str) -> Result<()> {
+        let store = StashStore::new(&self.vault_dir);
+        let entry = store.get(name)?;
+        self.restore_tree(&entry.tree_hash)?;
+        Ok(())
+    }
+
+    pub fn stash_drop(&self, name: &str) -> Result<()> {
+        StashStore::new(&self.vault_dir).drop(name)
+    }
+
+    // ignore
+    pub fn ignore_add(&self, pattern: &str) -> Result<()> {
+        let path = self.work_dir.join(".vaultignore");
+        let current = fs::read_to_string(&path).unwrap_or_default();
+        if current.lines().any(|l| l.trim() == pattern) {
+            return Ok(());
+        }
+        let new = format!("{}\n{}\n", current.trim_end(), pattern);
+        fs::write(path, new)?;
+        Ok(())
+    }
+
+    pub fn ignore_list(&self) -> Result<Vec<String>> {
+        let path = self.work_dir.join(".vaultignore");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        Ok(fs::read_to_string(path)?
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with("#"))
+            .map(|l| l.to_string())
+            .collect())
+    }
+
+    pub fn ignore_check(&self, file: &str) -> Result<Option<String>> {
+        let patterns = self.ignored_patterns();
+        for p in &patterns {
+            if file == p || file.starts_with(p.as_str()) {
+                return Ok(Some(p.clone()));
+            }
+            if p.starts_with("*") && file.ends_with(&p[1..]) {
+                return Ok(Some(p.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    // Snapshot
+    pub fn snapshot_save(&self, name: &str, note: Option<&str>) -> Result<()> {
+        let tree = self.snapshot_working_dir()?;
+        let store = SnapshotStore::new(&self.vault_dir);
+        store.save(SnapshotEntry {
+            name: name.to_string(),
+            tree_hash: tree,
+            created_at: Utc::now(),
+            note: note.map(|s| s.to_string()),
+        })
+    }
+
+    pub fn snapshot_list(&self) -> Result<Vec<SnapshotEntry>> {
+        SnapshotStore::new(&self.vault_dir).list()
+    }
+
+    pub fn snapshot_restore(&self, name: &str) -> Result<()> {
+        let store = SnapshotStore::new(&self.vault_dir);
+        let entry = store.get(name)?;
+        self.restore_tree(&entry.tree_hash)
+    }
+
+    pub fn snapshot_drop(&self, name: &str) -> Result<()> {
+        SnapshotStore::new(&self.vault_dir).drop(name)
+    }
+
+    pub fn split(
+        &self,
+        first_msg: &str,
+        second_msg: &str,
+        first_files: &[String],
+        second_files: &[String],
+    ) -> Result<SplitOutcome> {
+        let head_hash = self
+            .store
+            .resolve_head()?
+            .ok_or_else(|| VaultError::ObjectNotFound("HEAD".into()))?;
+        let head_commit = self.store.read_commit(&head_hash)?;
+
+        let full_tree_hash = self.snapshot_working_dir()?;
+        let mut full_flat = HashMap::new();
+        flatten_tree(&self.store, &full_tree_hash, "", &mut full_flat)?;
+
+        let mut head_flat = HashMap::new();
+        flatten_tree(&self.store, &head_commit.tree, "", &mut head_flat)?;
+
+        let first_set: HashSet<&String> = first_files.iter().collect();
+        let second_set: HashSet<&String> = second_files.iter().collect();
+
+        // commit 1 tree: Head + first files change
+        let commit1_tree = self.build_partial_tree(&head_flat, &full_flat, &first_set)?;
+        let commit1 = Commit {
+            tree: commit1_tree,
+            parents: vec![head_hash.clone()],
+            author: self.author(),
+            timestamp: Utc::now(),
+            message: first_msg.to_string(),
+            change_id: Uuid::now_v7().to_string(),
+        };
+
+        let hash1 = self.store.write_commit(&commit1)?;
+
+        // commit 2 tree:
+        let mut commit1_flat = HashMap::new();
+        flatten_tree(&self.store, &commit1.tree, "", &mut commit1_flat)?;
+        let commit2_tree = self.build_partial_tree(&commit1_flat, &full_flat, &second_set)?;
+        let commit2 = Commit {
+            tree: commit2_tree,
+            parents: vec![hash1.clone()],
+            author: self.author(),
+            timestamp: Utc::now(),
+            message: second_msg.to_string(),
+            change_id: Uuid::now_v7().to_string(),
+        };
+
+        let hash2 = self.store.write_commit(&commit2)?;
+
+        let branch = self
+            .store
+            .current_branch()?
+            .unwrap_or_else(|| "main".to_string());
+        self.store.write_branch(&branch, &hash2)?;
+
+        self.oplog.append(&OpEntry {
+            op: "split".to_string(),
+            timestamp: Utc::now(),
+            head_before: Some(head_hash),
+            head_after: Some(hash2.clone()),
+            branch: Some(branch),
+            message: Some(format!("{} / {}", first_msg, second_msg)),
+            extra: None,
+            undone: false,
+        })?;
+
+        Ok(SplitOutcome {
+            first_hash: hash1,
+            second_hash: hash2,
+        })
+    }
+
+    // Restore
+    // Restore a file
+    pub fn restore_file(&self, rel_path: &str, from_hash: Option<&str>) -> Result<()> {
+        let commit_hash = match from_hash {
+            Some(h) => h.to_string(),
+            None => self
+                .store
+                .resolve_head()?
+                .ok_or_else(|| VaultError::ObjectNotFound("HEAD".to_string()))?,
+        };
+
+        let commit = self.store.read_commit(&commit_hash)?;
+        let mut flat: HashMap<String, (EntryKind, String)> = HashMap::new();
+        flatten_tree(&self.store, &commit.tree, "", &mut flat)?;
+
+        match flat.get(rel_path) {
+            None => {
+                let abs = self.work_dir.join(rel_path);
+                if abs.exists() {
+                    fs::remove_file(abs)?;
+                }
+            }
+            Some((_, blob_hash)) => {
+                let content = self.store.read_blob(blob_hash)?;
+                let abs = self.work_dir.join(rel_path);
+                if let Some(parent) = abs.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(abs, content)?;
+            }
+        }
+        Ok(())
+    }
+
+    // Cherry pick
+    pub fn cherry_pick(
+        &self,
+        commit_hash: &str,
+        force_commit_conflicts: bool,
+    ) -> Result<CherryPickOutcome> {
+        let head_hash = self
+            .store
+            .resolve_head()?
+            .ok_or_else(|| VaultError::ObjectNotFound("HEAD".to_string()))?;
+        let head_commit = self.store.read_commit(&head_hash)?;
+
+        let result = compute_cherry(&self.store, commit_hash, &head_commit.tree)?;
+        if !result.conflicts.is_empty() && !force_commit_conflicts {
+            return Ok(CherryPickOutcome::Conflict(result.conflicts));
+        }
+        self.restore_tree(&result.new_tree_hash)?;
+
+        // build a commit
+        let source = self.store.read_commit(commit_hash)?;
+        let new_msg = format!("cherry-pick: {}", source.message);
+        let new_commit = Commit {
+            tree: result.new_tree_hash,
+            parents: vec![head_hash.clone()],
+            author: self.author(),
+            timestamp: Utc::now(),
+            message: new_msg,
+            change_id: source.change_id.clone(),
+        };
+
+        let new_hash = self.store.write_commit(&new_commit)?;
+        let branch = self.store.current_branch()?.unwrap_or("main".to_string());
+        self.store.write_branch(&branch, &new_hash)?;
+
+        self.oplog.append(&OpEntry {
+            op: "cherry-pick".to_string(),
+            timestamp: Utc::now(),
+            head_before: Some(head_hash),
+            head_after: Some(new_hash.clone()),
+            branch: Some(branch),
+            message: Some(new_commit.message.clone()),
+            extra: Some(commit_hash.to_string()),
+            undone: false,
+        })?;
+
+        if !result.conflicts.is_empty() {
+            Ok(CherryPickOutcome::ConflictSaved(new_hash, result.conflicts))
+        } else {
+            Ok(CherryPickOutcome::Clean(new_hash))
+        }
+    }
+
+    fn build_partial_tree(
+        &self,
+        base: &FlatTree,
+        full: &FlatTree,
+        paths: &HashSet<&String>,
+    ) -> Result<String> {
+        let mut result: HashMap<String, (EntryKind, String)> = base.clone();
+
+        for (path, (kind, hash)) in full {
+            if paths.contains(path) {
+                result.insert(path.clone(), (kind.clone(), hash.clone()));
+            }
+        }
+
+        for path in paths.iter() {
+            if !full.contains_key(path.as_str()) {
+                result.remove(path.as_str());
+            }
+        }
+        build_tree_from_flat_pub(&self.store, &result)
+    }
 }
 
 pub enum MergeOutcome {
@@ -506,4 +912,10 @@ pub enum UndoOutcome {
 pub struct ShowResult {
     pub commit: Commit,
     pub diffs: Vec<FileDiff>,
+}
+
+pub enum CherryPickOutcome {
+    Clean(String),
+    Conflict(Vec<String>),
+    ConflictSaved(String, Vec<String>),
 }

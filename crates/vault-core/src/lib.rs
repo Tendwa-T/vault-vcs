@@ -1,11 +1,13 @@
-pub mod error;
-pub mod objects;
-pub mod store;
+pub mod cherry;
 pub mod dag;
 pub mod diff;
+pub mod error;
 pub mod merge;
+pub mod objects;
 pub mod oplog;
 pub mod repo;
-
+pub mod snapshot;
+pub mod stash;
+pub mod store;
 pub use error::VaultError;
 pub use repo::Repo;

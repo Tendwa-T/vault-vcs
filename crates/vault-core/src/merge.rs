@@ -189,3 +189,10 @@ fn build_tree_from_flat(
     };
     store.write_tree(&tree)
 }
+
+pub fn build_tree_from_flat_pub(
+    store: &ObjectStore,
+    flat: &HashMap<String, (EntryKind, String)>,
+) -> Result<String> {
+    build_tree_from_flat(store, flat)
+}

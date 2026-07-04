@@ -10,5 +10,5 @@
 .DS_Store
 
 # Local vault VCS test repositories & databases
-.vault/
-*.log
+#.vault/
+#*.log
