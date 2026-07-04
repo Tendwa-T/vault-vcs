@@ -1,6 +1,6 @@
 use crate::diff::{DiffKind, diff_trees, flatten_tree};
 use crate::error::{Result, VaultError};
-use crate::objects::{ConflictObject, EntryKind, Tree, TreeEntry};
+use crate::objects::{ConflictObject, EntryKind};
 use crate::store::ObjectStore;
 use std::collections::HashMap;
 
@@ -134,49 +134,10 @@ pub fn compute_cherry(
             }
         }
     }
-    let new_tree_hash = build_tree_from_flat(store, &onto_flat)?;
+    let new_tree_hash = crate::merge::build_tree_from_flat_pub(store, &onto_flat)?;
     Ok(CherryResult {
         new_tree_hash,
         conflicts,
     })
 }
 
-// keeping it local
-fn build_tree_from_flat(
-    store: &ObjectStore,
-    flat: &HashMap<String, (EntryKind, String)>,
-) -> Result<String> {
-    let mut dirs: HashMap<String, HashMap<String, (EntryKind, String)>> = HashMap::new();
-    let mut root_entries: Vec<TreeEntry> = Vec::new();
-
-    for (path, (kind, hash)) in flat {
-        if let Some(slash_pos) = path.find('/') {
-            let dir = &path[..slash_pos];
-            let rest = &path[slash_pos + 1..];
-            dirs.entry(dir.to_string())
-                .or_default()
-                .insert(rest.to_string(), (kind.clone(), hash.clone()));
-        } else {
-            root_entries.push(TreeEntry {
-                name: path.clone(),
-                kind: kind.clone(),
-                hash: hash.clone(),
-            });
-        }
-    }
-
-    for (dir_name, subtree_flat) in dirs {
-        let subtree_hash = build_tree_from_flat(store, &subtree_flat)?;
-        root_entries.push(TreeEntry {
-            name: dir_name,
-            kind: EntryKind::Tree,
-            hash: subtree_hash,
-        });
-    }
-
-    root_entries.sort_by(|a, b| a.name.cmp(&b.name));
-    let tree = Tree {
-        entries: root_entries,
-    };
-    store.write_tree(&tree)
-}

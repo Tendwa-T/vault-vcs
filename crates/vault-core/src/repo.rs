@@ -1,4 +1,3 @@
-use crate::VaultError::ObjectNotFound;
 use crate::cherry::compute_cherry;
 use crate::diff::{DiffKind, FileDiff, diff_trees, flatten_tree};
 use crate::error::Result;
@@ -162,11 +161,10 @@ impl Repo {
             if rel_path == pattern || rel_path.starts_with(pattern.as_str()) {
                 return true;
             }
-            if pattern.starts_with("*") {
-                let suffix = &pattern[1..];
-                if rel_path.ends_with(suffix) {
-                    return true;
-                }
+            if let Some(suffix) = pattern.strip_prefix("*")
+                && rel_path.ends_with(suffix)
+            {
+                return true;
             }
         }
         false

@@ -184,11 +184,11 @@ pub fn line_diff(old: &str, new: &str) -> Vec<DiffHunk> {
     for &pos in &change_positions {
         let start = pos.saturating_sub(CTX);
         let end = (pos + CTX + 1).min(edits.len());
-        if let Some(last) = windows.last_mut() {
-            if start <= last.1 {
-                last.1 = last.1.max(end);
-                continue;
-            }
+        if let Some(last) = windows.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+            continue;
         }
         windows.push((start, end));
     }

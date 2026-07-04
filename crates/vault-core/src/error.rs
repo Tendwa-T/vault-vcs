@@ -11,7 +11,7 @@ pub enum VaultError {
     #[error("Branch not found: {0}")]
     BranchNotFound(String),
 
-    #[error("Branch already exists")]
+    #[error("Branch already exists: {0}")]
     BranchExists(String),
 
     #[error("Nothing to undo - operation log is empty")]

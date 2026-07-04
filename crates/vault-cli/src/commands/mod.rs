@@ -7,6 +7,7 @@ pub mod merge;
 pub mod oplog;
 pub mod save;
 pub mod show;
+pub mod split;
 pub mod status;
 pub mod switch;
 pub mod undo;

@@ -1,4 +1,5 @@
 mod commands;
+mod tui;
 
 use clap::{Parser, Subcommand};
 use commands::*;
@@ -72,6 +73,16 @@ enum Commands {
         #[arg(short, long)]
         message: Option<String>,
     },
+
+    /// Split working directory changes into two commits interactively
+    Split {
+        /// Commit message for the first commit
+        #[arg(long)]
+        m1: Option<String>,
+        /// Commit message for the second commit
+        #[arg(long)]
+        m2: Option<String>,
+    },
 }
 
 fn main() {
@@ -89,6 +100,7 @@ fn main() {
         Commands::Oplog => oplog::run(),
         Commands::Show { id } => show::run(&id),
         Commands::Amend { message } => amend::run(message.as_deref()),
+        Commands::Split { m1, m2 } => split::run(m1.as_deref(), m2.as_deref()),
     };
 
     if let Err(e) = result {

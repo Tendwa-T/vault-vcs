@@ -1723,6 +1723,9 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "crossterm",
+ "ratatui",
+ "uuid",
  "vault-core",
 ]
 
