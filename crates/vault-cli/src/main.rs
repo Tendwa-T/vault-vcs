@@ -109,6 +109,16 @@ enum Commands {
     },
     /// Cherry-pick a commit onto current branch (prompt/save on conflict)
     Cp { commit: String },
+    /// Manage remotes
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
+    },
+    /// Push commits to a remote
+    Push {
+        remote: String,
+        branch: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -166,6 +176,17 @@ enum SnapshotAction {
     Drop { name: String },
 }
 
+#[derive(Subcommand)]
+enum RemoteAction {
+    /// Add a new remote
+    Add {
+        name: String,
+        url: String,
+    },
+    /// List all remotes
+    List,
+}
+
 fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -209,6 +230,11 @@ fn main() {
         },
         Commands::Restore { path, from } => restore::run(&path, from.as_deref()),
         Commands::Cp { commit } => cp::run(&commit),
+        Commands::Remote { action } => match action {
+            RemoteAction::Add { name, url } => remote::run_add(&name, &url),
+            RemoteAction::List => remote::run_list(),
+        },
+        Commands::Push { remote, branch } => push::run(&remote, branch.as_deref()),
     };
 
     if let Err(e) = result {

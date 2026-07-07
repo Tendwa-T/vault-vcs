@@ -104,6 +104,11 @@ impl ObjectStore {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    pub fn read_object_raw(&self, kind_dir: &str, hash: &str) -> Result<Vec<u8>> {
+        let path = self.root.join("objects").join(kind_dir).join(hash);
+        fs::read(&path).map_err(|_| VaultError::ObjectNotFound(hash.to_string()))
+    }
+
     // Branches
     pub fn write_branch(&self, name: &str, commit_hash: &str) -> Result<()> {
         let path = self.branch_path(name);

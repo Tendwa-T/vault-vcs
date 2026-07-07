@@ -7,6 +7,8 @@ pub mod init;
 pub mod log;
 pub mod merge;
 pub mod oplog;
+pub mod push;
+pub mod remote;
 pub mod resolve;
 pub mod restore;
 pub mod save;

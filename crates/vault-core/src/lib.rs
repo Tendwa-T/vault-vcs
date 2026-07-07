@@ -11,3 +11,4 @@ pub mod stash;
 pub mod store;
 pub use error::VaultError;
 pub use repo::Repo;
+pub mod remote;
